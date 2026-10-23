@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+bin/
+obj/
+out/
+cmake-build-*/
+.vs/
+*.user
+*.suo
+
+# Scratch and debugging dumps/logs
+scratch/
+tools/pluginval/*.exe
+tools/pluginval/*.zip
+tools/pluginval/*.txt
+*.log
+*.dmp
+
+# OS files
+.DS_Store
+Thumbs.db
