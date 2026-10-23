@@ -10,15 +10,8 @@ if (MSVC)
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG:FULL")
 endif()
 
-# JUCE 8 via FetchContent
-include(FetchContent)
-FetchContent_Declare(
-    JUCE
-    GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG 8.0.6
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(JUCE)
+# JUCE 8
+add_subdirectory(JUCE)
 
 set(AIMIXER_COMMON_SOURCES
     Source/Common/Types.h
@@ -47,6 +40,10 @@ set(AIMIXER_COMMON_SOURCES
     Source/DSP/ReverbEngine.cpp
     Source/DSP/DelayEngine.h
     Source/DSP/DelayEngine.cpp
+    Source/Brain/PluginCurator.h
+    Source/Brain/PluginCurator.cpp
+    Source/DSP/HostedPluginChain.h
+    Source/DSP/HostedPluginChain.cpp
     Source/DSP/SolverStage.h
     Source/DSP/SolverStage.cpp
     Source/DSP/PlaybookStage.h
@@ -73,6 +70,8 @@ set(AIMIXER_PLUGIN_SOURCES
     Source/UI/SourceView.cpp
     Source/UI/BusView.h
     Source/UI/BusView.cpp
+    Source/UI/WavesRackComponent.h
+    Source/UI/WavesRackComponent.cpp
 )
 
 # Build VST3 and Standalone
@@ -99,6 +98,7 @@ target_compile_definitions(AIMixer
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
+        JUCE_PLUGINHOST_VST3=1
 )
 
 target_link_libraries(AIMixer
@@ -139,3 +139,6 @@ target_link_libraries(AIMixerTests
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+
+
+

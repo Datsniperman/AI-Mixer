@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include "Brain/WavesDialer.h"
 #include "PluginEditor.h"
 
 namespace aimixer {
@@ -126,6 +127,7 @@ void AIMixerAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     masterChain.prepare(spec);
     loudnessMeter.prepare(sampleRate);
     solverStage.prepare(spec);
+    hostedChain.prepare(sampleRate, samplesPerBlock, getTotalNumOutputChannels());
     applyRoleLatency();
 }
 
@@ -137,6 +139,7 @@ void AIMixerAudioProcessor::releaseResources() {
     masterChain.reset();
     loudnessMeter.reset();
     solverStage.reset();
+    hostedChain.release();
 }
 
 bool AIMixerAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
@@ -205,6 +208,10 @@ void AIMixerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         // Step 2: Universal Safe Chain DSP processing (0 latency)
         safeChain.process(buffer);
 
+        // Insert Hosted Waves Rack (Dual Compression / Tone Shaping)
+        juce::MidiBuffer emptyMidi;
+        hostedChain.process(buffer, emptyMidi);
+
         // Step 3: Per-instrument Playbook Stage (gate, charEQ, de-esser, warmth, transient, local rider, pan/width)
         playbookStage.process(buffer);
 
@@ -212,9 +219,13 @@ void AIMixerAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         solverStage.process(buffer);
     } else if (currentRole == PluginRole::Bus) {
         // Bus Role: Glue compression by bus type + shelf (0 latency)
+        juce::MidiBuffer busMidi;
+        hostedChain.process(buffer, busMidi);
         busStage.process(buffer);
     } else if (currentRole == PluginRole::Master) {
         // Master Role: Tonal balance EQ -> Master glue -> Loudness auto-gain -> 4x lookahead limiter
+        juce::MidiBuffer masterMidi;
+        hostedChain.process(buffer, masterMidi);
         masterChain.process(buffer);
 
         // BS.1770-5 K-weighted loudness metering tap
@@ -238,12 +249,41 @@ void AIMixerAudioProcessor::setRole(PluginRole newRole) {
 }
 
 void AIMixerAudioProcessor::applyRoleLatency() {
+    int totalLatency = hostedChain.getTotalLatencySamples();
     if (currentRole == PluginRole::Master) {
-        setLatencySamples(masterChain.getReportedLatencySamples());
-    } else {
-        setLatencySamples(0);
+        totalLatency += masterChain.getReportedLatencySamples();
     }
+    setLatencySamples(totalLatency);
     updateHostDisplay();
+}
+
+void AIMixerAudioProcessor::curateAndLoadChain() {
+    bool isLive = (currentTasteState.sessionMode == SessionMode::Live);
+    bool isStereo = (getTotalNumOutputChannels() >= 2);
+    std::vector<juce::PluginDescription> descs;
+
+    if (currentRole == PluginRole::Source) {
+        auto recipe = PluginCurator::getRecipeForSource(resolvedInstrument);
+        descs = PluginCurator::getInstance().resolveChain(recipe, isLive, isStereo);
+    } else if (currentRole == PluginRole::Bus) {
+        auto recipe = PluginCurator::getRecipeForBus(busStage.getBusType());
+        descs = PluginCurator::getInstance().resolveChain(recipe, isLive, isStereo);
+    } else if (currentRole == PluginRole::Master) {
+        auto recipe = PluginCurator::getRecipeForMaster();
+        descs = PluginCurator::getInstance().resolveChain(recipe, isLive, isStereo);
+    }
+
+    hostedChain.clearAllSlots();
+    for (size_t i = 0; i < descs.size() && i < hostedChain.getNumSlots(); ++i) {
+                if (hostedChain.loadSlot(i, descs[i])) {
+            if (auto* slot = hostedChain.getSlot(i)) {
+                if (auto* inst = slot->getInstance()) {
+                    WavesDialer::dialPluginForInstrument(*inst, resolvedInstrument, busStage.getBusType(), analyzer.getInstantRmsDb());
+                }
+            }
+        }
+    }
+    applyRoleLatency();
 }
 
 void AIMixerAudioProcessor::updateTrackProperties(const TrackProperties& properties) {
@@ -345,7 +385,16 @@ void AIMixerAudioProcessor::timerCallback() {
     );
 
     // Pass resolved instrument to Safe Chain and Playbook Stage
-    safeChain.setInstrumentType(resolvedInstrument);
+        safeChain.setInstrumentType(resolvedInstrument);
+
+    // Trigger auto-curation on initial load if rack is empty
+    static int autoCurateCooldown = 0;
+    if (!hostedChain.hasAnyLoaded() && (resolvedInstrument != InstrumentType::Unknown || currentRole != PluginRole::Source)) {
+        if (++autoCurateCooldown >= 15) {
+            autoCurateCooldown = 0;
+            curateAndLoadChain();
+        }
+    }
 
     if (currentRole == PluginRole::Source) {
         playbookStage.setInstrumentIdentity(resolvedInstrument, currentParseResult.side);
@@ -513,7 +562,13 @@ void AIMixerAudioProcessor::getStateInformation(juce::MemoryBlock& destData) {
     auto state = apvts.copyState();
     state.setProperty("trackName", juce::String(trackName), nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
-    copyXmlToBinary(*xml, destData);
+        juce::MemoryBlock chainBlock;
+    hostedChain.getState(chainBlock);
+    if (chainBlock.getSize() > 0) {
+        state.setProperty("hostedChainState", chainBlock.toBase64Encoding(), nullptr);
+    }
+    std::unique_ptr<juce::XmlElement> updatedXml(state.createXml());
+    copyXmlToBinary(*updatedXml, destData);
 }
 
 void AIMixerAudioProcessor::setStateInformation(const void* data, int sizeInBytes) {
@@ -528,7 +583,14 @@ void AIMixerAudioProcessor::setStateInformation(const void* data, int sizeInByte
         if (apvts.state.hasProperty("trackName")) {
             trackName = apvts.state.getProperty("trackName").toString().toStdString();
             instanceNode.setTrackName(trackName);
-            currentParseResult = TrackNameParser::parse(trackName);
+                        currentParseResult = TrackNameParser::parse(trackName);
+        }
+        if (apvts.state.hasProperty("hostedChainState")) {
+            juce::MemoryBlock chainBlock;
+            chainBlock.fromBase64Encoding(apvts.state.getProperty("hostedChainState").toString());
+            if (chainBlock.getSize() > 0) {
+                hostedChain.setState(chainBlock.getData(), static_cast<int>(chainBlock.getSize()));
+            }
         }
     }
 }
@@ -552,3 +614,11 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {
         return nullptr;
     }
 }
+
+
+
+
+
+
+
+

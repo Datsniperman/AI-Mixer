@@ -6,6 +6,7 @@
 #include "../DSP/Analyzer.h"
 #include "../DSP/SafeChain.h"
 #include "../Analysis/TrackNameParser.h"
+#include "WavesRackComponent.h"
 
 namespace aimixer {
 
@@ -76,6 +77,7 @@ private:
     juce::Label sendTrimLabel { {}, "Send Trim" };
 
     juce::Label sessionModePill;
+    WavesRackComponent wavesRack;
 
     float currentSpectrum[NUM_SPECTRUM_BANDS] = {0.0f};
     float currentRmsDb = -100.0f;
@@ -84,3 +86,4 @@ private:
 };
 
 } // namespace aimixer
+

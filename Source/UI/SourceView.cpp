@@ -6,7 +6,9 @@
 namespace aimixer {
 
 SourceView::SourceView(AIMixerAudioProcessor& proc)
-    : processor(proc) {
+    : processor(proc), wavesRack(proc.getHostedChain()) {
+    wavesRack.setProcessor(&proc);
+    addAndMakeVisible(wavesRack);
     auto& apvts = processor.getAPVTS();
 
     // Instrument Dropdown
@@ -190,6 +192,10 @@ void SourceView::paint(juce::Graphics& g) {
     auto bottomBar = bounds.removeFromBottom(28);
     auto solverArea = bounds.removeFromBottom(74);
     bounds.removeFromBottom(8); // Gap
+    auto wavesRackArea = bounds.removeFromBottom(120);
+    wavesRack.setBounds(wavesRackArea);
+    bounds.removeFromBottom(8);
+
     auto safeChainArea = bounds.removeFromBottom(106);
     bounds.removeFromBottom(8); // Gap
 
@@ -336,6 +342,10 @@ void SourceView::resized() {
     solverReasonLabel3.setBounds(reasonInner.reduced(2, 0));
 
     // Safe Chain Area (106px)
+    auto wavesRackArea = bounds.removeFromBottom(120);
+    wavesRack.setBounds(wavesRackArea);
+    bounds.removeFromBottom(8);
+
     auto safeChainArea = bounds.removeFromBottom(106);
     safeChainArea.removeFromTop(24);
     auto inner = safeChainArea.reduced(8, 2);
@@ -453,3 +463,6 @@ void SourceView::timerCallback() {
 }
 
 } // namespace aimixer
+
+
+

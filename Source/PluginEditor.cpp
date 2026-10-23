@@ -55,8 +55,8 @@ AIMixerAudioProcessorEditor::AIMixerAudioProcessorEditor(AIMixerAudioProcessor& 
     updateActiveView();
 
     setResizable(true, true);
-    setResizeLimits(700, 480, 1600, 1000);
-    setSize(920, 580);
+    setResizeLimits(760, 560, 1600, 1000);
+    setSize(960, 680);
 
     startTimerHz(10);
     auto snapshot = audioProcessor.getInstanceNode().getSessionSnapshot();
@@ -179,3 +179,4 @@ void AIMixerAudioProcessorEditor::timerCallback() {
 }
 
 } // namespace aimixer
+

@@ -17,6 +17,8 @@
 #include "Analysis/InstrumentClassifier.h"
 #include "Brain/ProfileManager.h"
 #include "Brain/TasteProfile.h"
+#include "DSP/HostedPluginChain.h"
+#include "Brain/PluginCurator.h"
 
 namespace aimixer {
 
@@ -62,6 +64,8 @@ public:
     SolverStage& getSolverStage() noexcept { return solverStage; }
     SolverState& getSolverState() noexcept { return solverState; }
     ProfileManager& getProfileManager() noexcept { return profileManager; }
+    HostedPluginChain& getHostedChain() noexcept { return hostedChain; }
+    void curateAndLoadChain();
     const GlobalTasteState& getCurrentTasteState() const noexcept { return currentTasteState; }
 
     // More/Less of Me & Local FX
@@ -107,6 +111,7 @@ private:
     SolverState solverState;
     InstrumentClassifier classifier;
     ProfileManager profileManager;
+    HostedPluginChain hostedChain;
 
     GlobalTasteState currentTasteState;
 
@@ -133,3 +138,4 @@ private:
 };
 
 } // namespace aimixer
+
