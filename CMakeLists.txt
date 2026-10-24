@@ -10,8 +10,19 @@ if (MSVC)
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG:FULL")
 endif()
 
-# JUCE 8
-add_subdirectory(JUCE)
+# JUCE 8 via FetchContent or local directory
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/JUCE")
+    add_subdirectory(JUCE)
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        JUCE
+        GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+        GIT_TAG 8.0.6
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(JUCE)
+endif()
 
 set(AIMIXER_COMMON_SOURCES
     Source/Common/Types.h
