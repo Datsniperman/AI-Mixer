@@ -23,6 +23,7 @@
 #include "../Source/DSP/DelayEngine.h"
 #include "../Source/PluginProcessor.h"
 #include "../Source/PluginEditor.h"
+#include "../Source/Brain/WavesDialer.h"
 #include "WavesHostingSpike.h"
 
 using namespace aimixer;
@@ -343,6 +344,7 @@ void testAutoTrimConvergence() {
 
     // Test C: Hold test - 10 consecutive cycles at steady input, verify no oscillation > 0.5 dB
     float startHold = chain.getAutoTrimDb();
+    (void)startHold;
     for (int cycle = 0; cycle < 20; ++cycle) {
         chain.updateAutoTrimWorker(-18.0f);
     }
@@ -3609,6 +3611,267 @@ void testHostPattern_StateSaveRestore50Times() {
     std::cout << "  [PASS] State save/restore 50 iterations verified without corruption." << std::endl;
 }
 
+
+// ==============================================================================
+// AI Mixer v1.1 — Local LLM & Dynamic Waves Verification Suite
+// ==============================================================================
+
+class MockWavesPlugin : public juce::AudioProcessor {
+public:
+    MockWavesPlugin(const juce::String& name, const std::vector<juce::String>& paramNames)
+        : pluginName(name) {
+        for (const auto& pName : paramNames) {
+            addParameter(new juce::AudioParameterFloat(juce::ParameterID(pName, 1), pName, 0.0f, 1.0f, 0.5f));
+        }
+    }
+    const juce::String getName() const override { return pluginName; }
+    void prepareToPlay(double, int) override {}
+    void releaseResources() override {}
+    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override {}
+    double getTailLengthSeconds() const override { return 0.0; }
+    bool acceptsMidi() const override { return false; }
+    bool producesMidi() const override { return false; }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return false; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return ""; }
+    void changeProgramName(int, const juce::String&) override {}
+    void getStateInformation(juce::MemoryBlock&) override {}
+    void setStateInformation(const void*, int) override {}
+private:
+    juce::String pluginName;
+};
+
+void testV11_AcousticFeatureExtraction() {
+    std::cout << "[AI MIXER v1.1 TEST 1] Acoustic Feature Extraction (Resonances, Sibilance, Tilt)..." << std::endl;
+
+    AudioAnalyzer analyzer;
+    analyzer.prepare(48000.0, 512);
+
+    // 1. Synthesize 800 Hz resonance tone with broadband background noise
+    juce::AudioBuffer<float> block(2, 512);
+    double phase = 0.0;
+    const double phaseInc = 2.0 * juce::MathConstants<double>::pi * 800.0 / 48000.0;
+
+    for (int b = 0; b < 60; ++b) {
+        auto* l = block.getWritePointer(0);
+        auto* r = block.getWritePointer(1);
+        for (int i = 0; i < 512; ++i) {
+            float noise = ((float)std::rand() / (float)RAND_MAX - 0.5f) * 0.04f;
+            float s = 0.35f * (float)std::sin(phase) + noise;
+            phase += phaseInc;
+            l[i] = s;
+            r[i] = s;
+        }
+        analyzer.processAudioBlock(block);
+        InstanceTelemetry telem;
+        analyzer.updateAnalysis(telem);
+    }
+
+    AcousticFeatures feat = analyzer.getAcousticFeatures();
+    std::cout << "  Measured Resonance: " << feat.detectedResonanceHz 
+              << " Hz (Prominence: " << feat.resonanceProminenceDb << " dB)" << std::endl;
+    TEST_CHECK(feat.detectedResonanceHz >= 600.0f && feat.detectedResonanceHz <= 1000.0f,
+               "Analyzer must identify ~800 Hz resonance peak");
+    TEST_CHECK(feat.resonanceProminenceDb > 2.0f,
+               "Resonance prominence must be detected above 2.0 dB");
+
+    // 2. Synthesize Sibilance (7 kHz burst vs low-mid energy)
+    analyzer.reset();
+    analyzer.prepare(48000.0, 512);
+    double sibPhase = 0.0;
+    const double sibPhaseInc = 2.0 * juce::MathConstants<double>::pi * 7000.0 / 48000.0;
+
+    for (int b = 0; b < 60; ++b) {
+        auto* l = block.getWritePointer(0);
+        auto* r = block.getWritePointer(1);
+        for (int i = 0; i < 512; ++i) {
+            float s = 0.4f * (float)std::sin(sibPhase);
+            sibPhase += sibPhaseInc;
+            l[i] = s;
+            r[i] = s;
+        }
+        analyzer.processAudioBlock(block);
+        InstanceTelemetry telem;
+        analyzer.updateAnalysis(telem);
+    }
+
+    feat = analyzer.getAcousticFeatures();
+    std::cout << "  Measured Sibilance Centroid: " << feat.sibilanceCentroidHz 
+              << " Hz (Ratio: " << feat.sibilanceRatio << ")" << std::endl;
+    TEST_CHECK(feat.sibilanceCentroidHz >= 5500.0f && feat.sibilanceCentroidHz <= 9000.0f,
+               "Analyzer must detect high frequency centroid in sibilance band");
+
+    std::cout << "  [PASS] Acoustic Feature Extraction (Resonances, Sibilance, Tilt) verified." << std::endl;
+}
+
+void testV11_LLMPromptAndJsonParsing() {
+    std::cout << "[AI MIXER v1.1 TEST 2] LLM Prompt Generation and Resilient JSON Parsing..." << std::endl;
+
+    // 1. Verify prompt engineering
+    juce::String sysPrompt = LLMProducerClient::buildSystemPrompt();
+    TEST_CHECK(sysPrompt.containsIgnoreCase("Waves"), "System prompt must specify Waves inventory");
+    TEST_CHECK(sysPrompt.containsIgnoreCase("JSON"), "System prompt must mandate JSON output");
+
+    std::vector<SessionTrackDiagnosis> session;
+    SessionTrackDiagnosis t1;
+    t1.instanceId = 42;
+    t1.trackName = "Lead Vocal";
+    t1.identifiedInstrument = InstrumentType::LeadVocal;
+    t1.rmsDb = -18.2f;
+    t1.crestFactorDb = 13.5f;
+    t1.detectedResonanceHz = 3200.0f;
+    t1.resonanceProminenceDb = 5.2f;
+    t1.sibilanceRatio = 0.38f;
+    t1.sibilanceCentroidHz = 7150.0f;
+    session.push_back(t1);
+
+    juce::String userPrompt = LLMProducerClient::buildUserPrompt(session, "Modern Worship");
+    TEST_CHECK(userPrompt.contains("Lead Vocal"), "User prompt must contain track name");
+    TEST_CHECK(userPrompt.contains("3200"), "User prompt must report measured 3200 Hz resonance");
+    TEST_CHECK(userPrompt.contains("7150"), "User prompt must report measured 7150 Hz sibilance centroid");
+
+    // 2. Parse complete LLM response wrapped in markdown code fence
+    juce::String modelJson = 
+        "```json\n"
+        "{\n"
+        "  \"mix_summary\": \"Polished vocal with surgical resonance cut and tight low end\",\n"
+        "  \"tracks\": [\n"
+        "    {\n"
+        "      \"instance_id\": 42,\n"
+        "      \"refined_instrument\": \"LeadVocal\",\n"
+        "      \"balance_trim_db\": -1.2,\n"
+        "      \"pan_position\": 0.0,\n"
+        "      \"reverb_send_db\": -16.0,\n"
+        "      \"delay_send_db\": -24.0,\n"
+        "      \"engineer_notes\": \"Notched 3.2kHz harshness and controlled vocal dynamics\",\n"
+        "      \"slots\": [\n"
+        "        {\n"
+        "          \"waves_plugin_name\": \"SSLChannel Stereo\",\n"
+        "          \"eq_mid_freq_hz\": 3200.0,\n"
+        "          \"eq_mid_gain_db\": -4.0,\n"
+        "          \"target_threshold_db\": -20.0,\n"
+        "          \"target_ratio\": 4.0,\n"
+        "          \"de_esser_freq_hz\": 0.0\n"
+        "        },\n"
+        "        {\n"
+        "          \"waves_plugin_name\": \"Sibilance Stereo\",\n"
+        "          \"eq_mid_freq_hz\": 0.0,\n"
+        "          \"eq_mid_gain_db\": 0.0,\n"
+        "          \"target_threshold_db\": -18.0,\n"
+        "          \"target_ratio\": 0.0,\n"
+        "          \"de_esser_freq_hz\": 7150.0\n"
+        "        }\n"
+        "      ]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "```";
+
+    ProducedMixPlan plan = LLMProducerClient::parseModelResponse(modelJson, session);
+    TEST_CHECK(plan.success, "JSON parsing must succeed for fenced model output");
+    TEST_CHECK(plan.tracks.size() == 1, "Plan must have exactly 1 track parsed");
+    TEST_CHECK(plan.tracks[0].instanceId == 42, "Parsed instanceId must match");
+    TEST_CHECK(plan.tracks[0].refinedInstrument == InstrumentType::LeadVocal, "Parsed instrument must match LeadVocal");
+    TEST_CHECK(plan.tracks[0].slots.size() == 2, "Parsed slots count must be 2");
+    TEST_CHECK(plan.tracks[0].slots[0].wavesPluginName == "SSLChannel Stereo", "Slot 0 plugin name must match");
+    TEST_CHECK(plan.tracks[0].slots[0].eqMidFreqHz == 3200.0f, "Slot 0 EQ mid freq must match");
+    TEST_CHECK(plan.tracks[0].slots[1].deEsserFreqHz == 7150.0f, "Slot 1 de-esser freq must match");
+
+    // 3. Malformed JSON Resilience
+    ProducedMixPlan badPlan = LLMProducerClient::parseModelResponse("Not Valid JSON at all", session);
+    TEST_CHECK(!badPlan.success, "Malformed JSON must set plan.success to false");
+    TEST_CHECK(badPlan.errorReason.isNotEmpty(), "Malformed JSON must report error reason");
+
+    std::cout << "  [PASS] LLM prompt generation and resilient JSON parsing verified." << std::endl;
+}
+
+void testV11_WavesDialerDynamicMath() {
+    std::cout << "[AI MIXER v1.1 TEST 3] Dynamic Waves Parameter Calibration Math..." << std::endl;
+
+    // 1. Test SSLChannel dynamic calibration with acoustic resonance
+    MockWavesPlugin ssl("SSLChannel Stereo", {
+        "Analog", "Bypass", "EQBypass", "DynamicBypass",
+        "CompFast", "CompRelease", "CompRatio", "CompThresh",
+        "LMF Frq", "LMF Gain", "LMF Q", "HF Gain"
+    });
+
+    ProducedSlotDirective sslDirective;
+    sslDirective.wavesPluginName = "SSLChannel Stereo";
+    sslDirective.bypassed = false;
+    sslDirective.targetThresholdDb = -22.0f;
+    sslDirective.targetRatio = 4.0f;
+
+    AcousticFeatures acoustic;
+    acoustic.detectedResonanceHz = 850.0f;
+    acoustic.resonanceProminenceDb = 6.5f;
+    acoustic.crestFactorDb = 14.0f;
+
+    WavesDialer::dialPluginDynamically(ssl, sslDirective, acoustic);
+
+    auto* analogParam = ssl.getParameters()[0];
+    auto* threshParam = ssl.getParameters()[7];
+    auto* lmfFreqParam = ssl.getParameters()[8];
+    auto* lmfGainParam = ssl.getParameters()[9];
+
+    TEST_CHECK(analogParam->getValue() == 0.0f, "Analog button must be forced off for noise elimination");
+    TEST_CHECK(threshParam->getValue() > 0.0f && threshParam->getValue() < 0.6f, 
+               "Compressor threshold must be dynamically calibrated");
+    TEST_CHECK(lmfFreqParam->getValue() > 0.2f && lmfFreqParam->getValue() < 0.8f,
+               "LMF frequency must be centered near 850 Hz");
+    TEST_CHECK(lmfGainParam->getValue() < 0.5f,
+               "LMF gain must cut the resonance (gain < 0.5 normalized)");
+
+    // 2. Test Sibilance dynamic calibration with measured centroid
+    MockWavesPlugin sibilance("Sibilance Stereo", {
+        "Freq", "Frequency", "Sidechain", "Thresh", "Threshold", "Bypass", "Analog"
+    });
+
+    ProducedSlotDirective sibDirective;
+    sibDirective.wavesPluginName = "Sibilance Stereo";
+    sibDirective.deEsserFreqHz = 7200.0f;
+
+    AcousticFeatures sibAcoustic;
+    sibAcoustic.sibilanceRatio = 0.42f;
+    sibAcoustic.sibilanceCentroidHz = 7200.0f;
+
+    WavesDialer::dialPluginDynamically(sibilance, sibDirective, sibAcoustic);
+
+    auto* freqParam = sibilance.getParameters()[0];
+    auto* scParam = sibilance.getParameters()[2];
+    auto* sibThreshParam = sibilance.getParameters()[3];
+
+    TEST_CHECK(freqParam->getValue() > 0.35f, "De-Esser frequency must target > 7 kHz sibilance");
+    TEST_CHECK(scParam->getValue() == 1.0f, "Sidechain must be engaged in focused bandpass mode");
+    TEST_CHECK(std::abs(sibThreshParam->getValue() - 0.432f) < 0.01f, "Threshold must be calibrated for heavy sibilance ratio");
+
+    // 3. Test CLA-76 FET Slammer dynamic calibration
+    MockWavesPlugin cla76("CLA-76 Stereo", {
+        "Bypass", "Analog", "Comp Off", "Attack", "Release", "Ratio", "Input", "Output"
+    });
+
+    ProducedSlotDirective claDirective;
+    claDirective.wavesPluginName = "CLA-76 Stereo";
+
+    AcousticFeatures claAcoustic;
+    claAcoustic.rmsDb = -26.0f; // Lower RMS drives input harder (+8 dB offset)
+    claAcoustic.crestFactorDb = 16.0f; // High dynamic transient peaks
+
+    WavesDialer::dialPluginDynamically(cla76, claDirective, claAcoustic);
+
+    auto* claAnalog = cla76.getParameters()[1];
+    auto* claAttack = cla76.getParameters()[3];
+    auto* claInput = cla76.getParameters()[6];
+
+    TEST_CHECK(claAnalog->getValue() == 0.0f, "CLA-76 analog must be off");
+    TEST_CHECK(std::abs(claAttack->getValue() - 0.40f) < 0.01f, "Attack must open up for high transient crest factor");
+    TEST_CHECK(std::abs(claInput->getValue() - 0.62f) < 0.01f, "CLA-76 input must drive harder for quiet/dynamic signal");
+
+    std::cout << "  [PASS] Dynamic Waves parameter calibration math verified." << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     if (argc > 1 && std::string(argv[1]) == "--registry-peer") {
         return runRegistryPeer();
@@ -3701,6 +3964,11 @@ int main(int argc, char* argv[]) {
         testHostPattern_LayoutChaos();
         testHostPattern_MultiProcessPeerAndFallback();
         testHostPattern_StateSaveRestore50Times();
+
+        // AI Mixer v1.1 Verification Suite
+        testV11_AcousticFeatureExtraction();
+        testV11_LLMPromptAndJsonParsing();
+        testV11_WavesDialerDynamicMath();
 
         std::cout << "\n======================================================" << std::endl;
         std::cout << "  ALL MVP 1-5 + HARDENING + HOST PATTERN TESTS PASSED! " << std::endl;

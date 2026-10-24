@@ -52,7 +52,10 @@ set(AIMIXER_COMMON_SOURCES
     Source/DSP/DelayEngine.h
     Source/DSP/DelayEngine.cpp
     Source/Brain/PluginCurator.h
-    Source/Brain/PluginCurator.cpp
+    Source/Brain/PluginCurator.cpp
+    Source/Brain/WavesDialer.h
+    Source/Brain/LLMProducerClient.h
+    Source/Brain/LLMProducerClient.cpp
     Source/DSP/HostedPluginChain.h
     Source/DSP/HostedPluginChain.cpp
     Source/DSP/SolverStage.h

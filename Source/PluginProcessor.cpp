@@ -595,6 +595,109 @@ void AIMixerAudioProcessor::setStateInformation(const void* data, int sizeInByte
     }
 }
 
+bool AIMixerAudioProcessor::isLLMProducing() const {
+    return LLMProducerClient::getInstance().isBusy();
+}
+
+ProducedMixPlan AIMixerAudioProcessor::getLatestMixPlan() const {
+    std::lock_guard<std::mutex> lock(mixPlanMutex);
+    return latestMixPlan;
+}
+
+void AIMixerAudioProcessor::produceMixWithLLM() {
+    auto& client = LLMProducerClient::getInstance();
+    if (client.isBusy()) return;
+
+    std::vector<SessionTrackDiagnosis> sessionTracks;
+
+    SessionTrackDiagnosis localDiag;
+    localDiag.instanceId = instanceNode.getInstanceId();
+    localDiag.trackName = instanceNode.getTrackName();
+    localDiag.identifiedInstrument = resolvedInstrument;
+    localDiag.sideHint = currentParseResult.side;
+    localDiag.isStereo = (getTotalNumOutputChannels() > 1);
+
+    auto features = analyzer.getAcousticFeatures();
+    localDiag.rmsDb = features.rmsDb;
+    localDiag.peakDb = features.peakDb;
+    localDiag.crestFactorDb = features.crestFactorDb;
+    localDiag.fundamentalHz = features.fundamentalHz;
+    localDiag.spectralCentroidHz = features.spectralCentroidHz;
+    localDiag.spectralTiltDbPerOct = features.spectralTiltDbPerOct;
+    localDiag.detectedResonanceHz = features.detectedResonanceHz;
+    localDiag.resonanceProminenceDb = features.resonanceProminenceDb;
+    localDiag.sibilanceRatio = features.sibilanceRatio;
+    localDiag.sibilanceCentroidHz = features.sibilanceCentroidHz;
+    localDiag.boxinessRatio = features.boxinessRatio;
+    localDiag.subEnergyRatio = features.subEnergyRatio;
+    localDiag.harmonicRichness = features.harmonicRichness;
+    localDiag.attackSharpness = features.attackSharpness;
+    sessionTracks.push_back(localDiag);
+
+    auto peers = instanceNode.getSessionSnapshot();
+    for (const auto& peer : peers) {
+        if (peer.instanceId == instanceNode.getInstanceId()) continue;
+        if (peer.role != PluginRole::Source && peer.role != PluginRole::Bus) continue;
+
+        SessionTrackDiagnosis pDiag;
+        pDiag.instanceId = peer.instanceId;
+        pDiag.trackName = juce::String(peer.trackName);
+        pDiag.identifiedInstrument = peer.instrumentType;
+        pDiag.sideHint = peer.sideHint;
+        pDiag.isStereo = (peer.stereoWidth > 0.1f);
+        pDiag.rmsDb = peer.rmsDb;
+        pDiag.peakDb = peer.peakDb;
+        pDiag.crestFactorDb = peer.crestFactorDb;
+        pDiag.fundamentalHz = peer.fundamentalHz;
+        pDiag.spectralCentroidHz = peer.spectralCentroidHz;
+        sessionTracks.push_back(pDiag);
+    }
+
+    juce::String genreName = juce::String(currentTasteState.profileName);
+
+    client.produceSessionMixAsync(sessionTracks, genreName, [this](const ProducedMixPlan& plan) {
+        {
+            std::lock_guard<std::mutex> lock(mixPlanMutex);
+            latestMixPlan = plan;
+        }
+
+        uint32_t myId = instanceNode.getInstanceId();
+        for (const auto& tp : plan.tracks) {
+            if (tp.instanceId == myId) {
+                if (auto* trimParam = apvts.getParameter("inputTrim")) {
+                    float targetDb = tp.balanceTrimDb;
+                    trimParam->setValueNotifyingHost(apvts.getParameterRange("inputTrim").convertTo0to1(targetDb));
+                }
+
+                if (!tp.slots.empty()) {
+                    auto& curator = PluginCurator::getInstance();
+                    std::vector<juce::PluginDescription> descs;
+                    for (const auto& slotDir : tp.slots) {
+                        if (const auto* desc = curator.findPlugin(slotDir.wavesPluginName, getTotalNumOutputChannels() > 1, false)) {
+                            descs.push_back(*desc);
+                        }
+                    }
+
+                    if (!descs.empty()) {
+                        hostedChain.clearAllSlots();
+                        for (size_t i = 0; i < descs.size() && i < hostedChain.getNumSlots() && i < tp.slots.size(); ++i) {
+                            if (hostedChain.loadSlot(i, descs[i])) {
+                                if (auto* slot = hostedChain.getSlot(i)) {
+                                    if (auto* inst = slot->getInstance()) {
+                                        WavesDialer::dialPluginDynamically(*inst, tp.slots[i], analyzer.getAcousticFeatures());
+                                    }
+                                }
+                            }
+                        }
+                        applyRoleLatency();
+                    }
+                }
+                break;
+            }
+        }
+    });
+}
+
 juce::AudioProcessorEditor* AIMixerAudioProcessor::createEditor() {
     return new AIMixerAudioProcessorEditor(*this);
 }

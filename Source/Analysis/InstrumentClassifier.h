@@ -19,6 +19,18 @@ struct AcousticFeatures {
     float highFreqRatio = 0.0f;     // > 5000 Hz energy share
     float isPercussive = 0.0f;      // 0.0 (smooth) to 1.0 (highly percussive)
     float stereoWidth = 1.0f;
+
+    // Advanced Acoustic Hearing (Measured symptoms & characteristics)
+    float detectedResonanceHz = 0.0f;      // Prominent narrow ringing / room mode
+    float resonanceProminenceDb = 0.0f;    // Prominence above local spectral envelope
+    float resonanceQ = 2.0f;               // Estimated sharpness of the resonance
+    float sibilanceRatio = 0.0f;           // High-frequency harshness (5.5 - 9 kHz vs 800 - 2.5 kHz)
+    float sibilanceCentroidHz = 7000.0f;   // Measured center of harsh sibilant bursts
+    float spectralTiltDbPerOct = -4.5f;    // Slope of the spectral curve (dark < -6.0, bright > -3.0)
+    float boxinessRatio = 0.0f;            // Mud/boxiness concentration in 350 - 700 Hz
+    float subEnergyRatio = 0.0f;           // Sub-bass energy concentration in 20 - 60 Hz
+    float harmonicRichness = 0.0f;         // 0.0 = pure/sterile, 1.0 = harmonically dense/saturated
+    float attackSharpness = 0.0f;          // Measured transient spike energy in first 10ms
 };
 
 struct ClassificationResult {

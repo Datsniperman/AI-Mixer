@@ -75,6 +75,11 @@ private:
     juce::Label learnedStatusLabel;
     juce::TextButton resetLearnedButton { "Reset Profile" };
 
+    // Autonomous Local LLM Mix Producer Controls
+    juce::TextButton produceMixButton { "Produce Mix (Local LLM)" };
+    juce::Label brainStatusLabel;
+    juce::Label mixSummaryLabel;
+
     juce::Viewport viewport;
     juce::Component gridContainer;
     std::vector<std::unique_ptr<InstanceTileComponent>> tiles;

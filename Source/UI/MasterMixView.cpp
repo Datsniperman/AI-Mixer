@@ -275,6 +275,20 @@ MasterMixView::MasterMixView(AIMixerAudioProcessor& proc)
         processor.getProfileManager().resetActiveProfileToDefault();
     };
     addAndMakeVisible(resetLearnedButton);
+    produceMixButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2563eb));
+    produceMixButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    produceMixButton.onClick = [this] {
+        processor.produceMixWithLLM();
+    };
+    addAndMakeVisible(produceMixButton);
+
+    brainStatusLabel.setFont(juce::FontOptions(11.0f).withStyle("Bold"));
+    brainStatusLabel.setText("● Brain: Connecting...", juce::dontSendNotification);
+    addAndMakeVisible(brainStatusLabel);
+
+    mixSummaryLabel.setFont(juce::FontOptions(11.0f));
+    mixSummaryLabel.setColour(juce::Label::textColourId, AIMixerLookAndFeel::getTextSecondary());
+    addAndMakeVisible(mixSummaryLabel);
 
     addAndMakeVisible(viewport);
     viewport.setViewedComponent(&gridContainer, false);
@@ -338,6 +352,14 @@ void MasterMixView::resized() {
     resetLearnedButton.setBounds(tasteBar.removeFromLeft(85).reduced(0, 2));
     tasteBar.removeFromLeft(8);
     learnedStatusLabel.setBounds(tasteBar);
+
+    // Producer AI Bar (32px)
+    auto producerBar = bounds.removeFromTop(30).reduced(16, 2);
+    produceMixButton.setBounds(producerBar.removeFromLeft(175));
+    producerBar.removeFromLeft(10);
+    brainStatusLabel.setBounds(producerBar.removeFromLeft(240));
+    producerBar.removeFromLeft(10);
+    mixSummaryLabel.setBounds(producerBar);
 
     bounds.removeFromTop(4); // Gap
     viewport.setBounds(bounds);
@@ -406,8 +428,31 @@ void MasterMixView::timerCallback() {
     auto msg = processor.getProfileManager().getLastLearnedMessage();
     learnedStatusLabel.setText(msg, juce::dontSendNotification);
 
+    // Brain Status & Producer Progress
+    if (processor.isLLMProducing()) {
+        produceMixButton.setEnabled(false);
+        produceMixButton.setButtonText("Producing Mix...");
+        brainStatusLabel.setColour(juce::Label::textColourId, juce::Colour(0xfff59e0b)); // Amber
+        brainStatusLabel.setText("● Brain: Analyzing Session & Dialing Waves...", juce::dontSendNotification);
+    } else {
+        produceMixButton.setEnabled(true);
+        produceMixButton.setButtonText("Produce Mix (Local LLM)");
+        if (LLMProducerClient::getInstance().isOllamaOnline()) {
+            brainStatusLabel.setColour(juce::Label::textColourId, juce::Colour(0xff10b981)); // Green
+            brainStatusLabel.setText("● Brain: Online (" + LLMProducerClient::getInstance().getActiveModelName() + ")", juce::dontSendNotification);
+        } else {
+            brainStatusLabel.setColour(juce::Label::textColourId, juce::Colour(0xff64748b)); // Slate
+            brainStatusLabel.setText("○ Brain: Acoustic Fallback (Offline)", juce::dontSendNotification);
+        }
+    }
+
+    auto plan = processor.getLatestMixPlan();
+    if (plan.success && plan.mixSummary.isNotEmpty()) {
+        mixSummaryLabel.setText(plan.mixSummary, juce::dontSendNotification);
+    }
+
     refreshInstanceTiles();
-    repaint(0, 0, getWidth(), 85); // Repaint header and taste bar
+    repaint(0, 0, getWidth(), 120); // Repaint header, taste bar, and producer bar
 }
 
 } // namespace aimixer

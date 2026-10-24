@@ -31,6 +31,14 @@ void AudioAnalyzer::reset() {
     smoothedPeak = -100.0f;
     calculatedCentroid = 1000.0f;
     calculatedFundamental = 0.0f;
+    smoothedResonanceHz = 0.0f;
+    smoothedResonanceProminence = 0.0f;
+    smoothedSibilanceRatio = 0.0f;
+    smoothedSibilanceCentroid = 7000.0f;
+    smoothedSpectralTilt = -4.5f;
+    smoothedBoxiness = 0.0f;
+    smoothedSubEnergy = 0.0f;
+    smoothedHarmonicRichness = 0.0f;
 }
 
 void AudioAnalyzer::processAudioBlock(const juce::AudioBuffer<float>& buffer) noexcept {
@@ -113,6 +121,83 @@ void AudioAnalyzer::calculate32Bands(const float* fftData) {
         calculatedCentroid = weightedFreqSum / totalMagnitude;
     }
     calculatedFundamental = peakFundFreq;
+
+    // 1. Resonance Hunter: Detect prominent narrow peaks (room modes, whistling resonances, ringing)
+    float maxPeakProminence = 0.0f;
+    float peakResonanceHz = 0.0f;
+    for (size_t b = 2; b < NUM_SPECTRUM_BANDS - 2; ++b) {
+        float localAvg = (smoothedBands[b - 2] + smoothedBands[b - 1] + smoothedBands[b + 1] + smoothedBands[b + 2]) * 0.25f;
+        float diff = smoothedBands[b] - localAvg;
+        if (diff > maxPeakProminence && smoothedBands[b] > 0.15f) {
+            maxPeakProminence = diff;
+            peakResonanceHz = SPECTRUM_BAND_FREQUENCIES[b];
+        }
+    }
+    float instProminenceDb = maxPeakProminence * 70.0f;
+    if (instProminenceDb > 2.5f) {
+        smoothedResonanceHz = 0.8f * smoothedResonanceHz + 0.2f * peakResonanceHz;
+        smoothedResonanceProminence = 0.8f * smoothedResonanceProminence + 0.2f * instProminenceDb;
+    } else {
+        smoothedResonanceProminence = 0.9f * smoothedResonanceProminence;
+    }
+
+    // 2. Sibilance & Harshness Analysis (5.5 kHz - 9.0 kHz vs 800 Hz - 2.5 kHz body)
+    float sibSum = 0.0f, sibWeightedFreq = 0.0f;
+    float bodyMidSum = 0.0f;
+    float subSum = 0.0f;
+    float boxSum = 0.0f;
+    float lowOctSum = 0.0f;
+    float highOctSum = 0.0f;
+
+    for (size_t b = 0; b < NUM_SPECTRUM_BANDS; ++b) {
+        float freq = SPECTRUM_BAND_FREQUENCIES[b];
+        float val = smoothedBands[b];
+
+        if (freq >= 20.0f && freq <= 60.0f) subSum += val;
+        if (freq >= 350.0f && freq <= 700.0f) boxSum += val;
+        if (freq >= 150.0f && freq <= 300.0f) lowOctSum += val;
+        if (freq >= 4000.0f && freq <= 8000.0f) highOctSum += val;
+
+        if (freq >= 5500.0f && freq <= 9000.0f) {
+            sibSum += val;
+            sibWeightedFreq += freq * val;
+        } else if (freq >= 800.0f && freq <= 2500.0f) {
+            bodyMidSum += val;
+        }
+    }
+
+    float instSibRatio = (bodyMidSum > 0.01f) ? (sibSum / bodyMidSum) : 0.0f;
+    smoothedSibilanceRatio = 0.85f * smoothedSibilanceRatio + 0.15f * instSibRatio;
+    if (sibSum > 0.01f) {
+        float instSibCentroid = sibWeightedFreq / sibSum;
+        smoothedSibilanceCentroid = 0.85f * smoothedSibilanceCentroid + 0.15f * instSibCentroid;
+    }
+
+    // 3. Spectral Tilt (slope between low-mids and presence)
+    float lowDb = juce::Decibels::gainToDecibels(std::max(0.0001f, lowOctSum / 3.0f));
+    float highDb = juce::Decibels::gainToDecibels(std::max(0.0001f, highOctSum / 3.0f));
+    float instTilt = (highDb - lowDb) / 4.7f;
+    smoothedSpectralTilt = 0.9f * smoothedSpectralTilt + 0.1f * std::clamp(instTilt, -12.0f, 6.0f);
+
+    // 4. Sub & Boxiness
+    float safeTotal = std::max(0.001f, totalMagnitude);
+    smoothedSubEnergy = 0.85f * smoothedSubEnergy + 0.15f * (subSum / safeTotal);
+    smoothedBoxiness = 0.85f * smoothedBoxiness + 0.15f * (boxSum / safeTotal);
+
+    // 5. Harmonic Richness (Overtone density)
+    if (calculatedFundamental > 40.0f && calculatedFundamental < 400.0f) {
+        float h2Freq = calculatedFundamental * 2.0f;
+        float h3Freq = calculatedFundamental * 3.0f;
+        float harmEnergy = 0.0f;
+        for (size_t b = 0; b < NUM_SPECTRUM_BANDS; ++b) {
+            float f = SPECTRUM_BAND_FREQUENCIES[b];
+            if (std::abs(f - h2Freq) < f * 0.15f || std::abs(f - h3Freq) < f * 0.15f) {
+                harmEnergy += smoothedBands[b];
+            }
+        }
+        float instHarmRichness = harmEnergy / (maxLowEnergy + 0.001f);
+        smoothedHarmonicRichness = 0.9f * smoothedHarmonicRichness + 0.1f * std::clamp(instHarmRichness, 0.0f, 1.0f);
+    }
 }
 
 void AudioAnalyzer::updateAnalysis(InstanceTelemetry& outTelemetry) {
@@ -197,6 +282,19 @@ AcousticFeatures AudioAnalyzer::getAcousticFeatures() const {
     f.highFreqRatio = highSum / totalSum;
     f.isPercussive = std::clamp((f.crestFactorDb - 8.0f) / 12.0f, 0.0f, 1.0f);
     f.stereoWidth = 1.0f;
+
+    // Advanced Acoustic Hearing features
+    f.detectedResonanceHz = smoothedResonanceHz;
+    f.resonanceProminenceDb = smoothedResonanceProminence;
+    f.resonanceQ = (smoothedResonanceProminence > 4.0f) ? 4.0f : 2.0f;
+    f.sibilanceRatio = smoothedSibilanceRatio;
+    f.sibilanceCentroidHz = smoothedSibilanceCentroid;
+    f.spectralTiltDbPerOct = smoothedSpectralTilt;
+    f.boxinessRatio = smoothedBoxiness;
+    f.subEnergyRatio = smoothedSubEnergy;
+    f.harmonicRichness = smoothedHarmonicRichness;
+    f.attackSharpness = std::clamp(f.crestFactorDb / 14.0f, 0.0f, 1.0f);
+
     return f;
 }
 

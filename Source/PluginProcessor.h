@@ -18,6 +18,7 @@
 #include "Brain/ProfileManager.h"
 #include "Brain/TasteProfile.h"
 #include "DSP/HostedPluginChain.h"
+#include "Brain/LLMProducerClient.h"
 #include "Brain/PluginCurator.h"
 
 namespace aimixer {
@@ -67,6 +68,11 @@ public:
     HostedPluginChain& getHostedChain() noexcept { return hostedChain; }
     void curateAndLoadChain();
     const GlobalTasteState& getCurrentTasteState() const noexcept { return currentTasteState; }
+
+    // Local LLM Mix Producer
+    void produceMixWithLLM();
+    bool isLLMProducing() const;
+    ProducedMixPlan getLatestMixPlan() const;
 
     // More/Less of Me & Local FX
     void setMoreLessDb(float db) noexcept { moreLessDb.store(std::clamp(db, -3.0f, 3.0f), std::memory_order_relaxed); }
@@ -131,8 +137,11 @@ private:
     std::atomic<bool> isBypassed{false};
     std::atomic<bool> isFrozen{false};
     std::atomic<bool> globalSolverEnabled{true};
-    std::atomic<int> processBlockCount{0};
-    int procTimerTick = 0;
+    std::atomic<int> processBlockCount{0};
+    int procTimerTick = 0;
+
+    ProducedMixPlan latestMixPlan;
+    mutable std::mutex mixPlanMutex;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AIMixerAudioProcessor)
 };

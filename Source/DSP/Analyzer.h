@@ -54,6 +54,16 @@ private:
     float smoothedPeak = -100.0f;
     float calculatedCentroid = 1000.0f;
     float calculatedFundamental = 0.0f;
+
+    // Advanced acoustic symptoms
+    float smoothedResonanceHz = 0.0f;
+    float smoothedResonanceProminence = 0.0f;
+    float smoothedSibilanceRatio = 0.0f;
+    float smoothedSibilanceCentroid = 7000.0f;
+    float smoothedSpectralTilt = -4.5f;
+    float smoothedBoxiness = 0.0f;
+    float smoothedSubEnergy = 0.0f;
+    float smoothedHarmonicRichness = 0.0f;
 };
 
 } // namespace aimixer

@@ -1,7 +1,8 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
-#include "../Common/Types.h"
+#include "../Common/Types.h"
+#include "LLMProducerClient.h"
 #include <string>
 
 namespace aimixer {
@@ -9,7 +10,7 @@ namespace aimixer {
 class WavesDialer {
 public:
     // Helper to find a parameter by name (case-insensitive substring)
-    static juce::AudioProcessorParameter* findParam(juce::AudioPluginInstance& inst, const juce::String& namePattern) {
+    static juce::AudioProcessorParameter* findParam(juce::AudioProcessor& inst, const juce::String& namePattern) {
         for (auto* p : inst.getParameters()) {
             if (p != nullptr && p->getName(64).containsIgnoreCase(namePattern)) {
                 return p;
@@ -19,19 +20,180 @@ public:
     }
 
     // Set normalized value safely with host notification
-    static void setParam(juce::AudioPluginInstance& inst, const juce::String& namePattern, float val) {
+    static void setParam(juce::AudioProcessor& inst, const juce::String& namePattern, float val) {
         if (auto* p = findParam(inst, namePattern)) {
             p->setValueNotifyingHost(std::clamp(val, 0.0f, 1.0f));
         }
     }
 
     // ==============================================================================
+    // Dynamic Autonomous Calibration: Dials ANY Waves plugin based on measured
+    // acoustic diagnostics (resonances, sibilance bursts, crest factor, and LLM directives)
+    // ==============================================================================
+    static void dialPluginDynamically(juce::AudioProcessor& inst,
+                                      const ProducedSlotDirective& directive,
+                                      const AcousticFeatures& acoustic) {
+        juce::String name = inst.getName();
+        setParam(inst, "Bypass", directive.bypassed ? 1.0f : 0.0f);
+        setParam(inst, "Analog", 0.0f);
+        setParam(inst, "ANLG", 0.0f);
+
+        // --- 1. SSL Channel & SSL EQ ---
+        if (name.containsIgnoreCase("SSLChannel") || name.containsIgnoreCase("SSLEQ") || name.containsIgnoreCase("SSLGChannel")) {
+            setParam(inst, "EQBypass", 0.0f);
+            setParam(inst, "DynamicBypass", 0.0f);
+
+            bool isFast = (acoustic.isPercussive > 0.4f || acoustic.crestFactorDb > 13.0f);
+            setParam(inst, "CompFast", isFast ? 1.0f : 0.0f);
+            setParam(inst, "CompRelease", 0.5f);
+
+            if (directive.targetThresholdDb != 0.0f) {
+                float normThresh = std::clamp((directive.targetThresholdDb + 30.0f) / 30.0f, 0.1f, 0.9f);
+                setParam(inst, "CompThresh", normThresh);
+            }
+
+            float targetResHz = (directive.eqMidFreqHz > 20.0f) ? directive.eqMidFreqHz : acoustic.detectedResonanceHz;
+            float targetCutDb = (directive.eqMidGainDb != 0.0f) ? directive.eqMidGainDb
+                              : (acoustic.resonanceProminenceDb > 2.5f ? -std::clamp(acoustic.resonanceProminenceDb, 2.0f, 6.0f) : 0.0f);
+
+            if (targetResHz >= 200.0f && targetResHz <= 2500.0f) {
+                float normFreq = std::clamp(std::log10(targetResHz / 200.0f) / std::log10(2500.0f / 200.0f), 0.0f, 1.0f);
+                float normGain = std::clamp(0.5f + (targetCutDb / 30.0f), 0.0f, 1.0f);
+                setParam(inst, "LMF Frq", normFreq);
+                setParam(inst, "LMF Gain", normGain);
+                setParam(inst, "LMF Q", 0.6f);
+            } else if (targetResHz > 2500.0f) {
+                float normFreq = std::clamp(std::log10(targetResHz / 1500.0f) / std::log10(16000.0f / 1500.0f), 0.0f, 1.0f);
+                float normGain = std::clamp(0.5f + (targetCutDb / 30.0f), 0.0f, 1.0f);
+                setParam(inst, "HMF Frq", normFreq);
+                setParam(inst, "HMF Gain", normGain);
+                setParam(inst, "HMF Q", 0.6f);
+            }
+            return;
+        }
+
+        // --- 2. F6 Dynamic EQ ---
+        if (name.containsIgnoreCase("F6")) {
+            setParam(inst, "Bypass", 0.0f);
+            float targetResHz = (directive.eqMidFreqHz > 20.0f) ? directive.eqMidFreqHz : acoustic.detectedResonanceHz;
+            if (targetResHz > 40.0f) {
+                setParam(inst, "Band 3 Freq", std::clamp(targetResHz / 20000.0f, 0.01f, 1.0f));
+                setParam(inst, "Band 3 Gain", std::clamp(0.5f + (directive.eqMidGainDb / 36.0f), 0.1f, 0.9f));
+                setParam(inst, "Band 3 Q", 0.7f);
+                setParam(inst, "Band 3 Threshold", 0.45f);
+            }
+            return;
+        }
+
+        // --- 3. CLA-76 FET Peak Tamer ---
+        if (name.containsIgnoreCase("CLA-76")) {
+            setParam(inst, "Bypass", 0.0f);
+            setParam(inst, "Analog", 0.0f);
+            setParam(inst, "Comp Off", 0.0f);
+
+            if (acoustic.crestFactorDb > 14.0f || acoustic.isPercussive > 0.5f) {
+                setParam(inst, "Attack", 0.40f);
+                setParam(inst, "Release", 0.85f);
+            } else {
+                setParam(inst, "Attack", 0.65f);
+                setParam(inst, "Release", 0.70f);
+            }
+            setParam(inst, "Ratio", 0.25f);
+            float inputDrive = std::clamp(0.50f + ((-18.0f - acoustic.rmsDb) * 0.015f), 0.35f, 0.75f);
+            setParam(inst, "Input", inputDrive);
+            setParam(inst, "Output", 0.50f);
+            return;
+        }
+
+        // --- 4. RVox Vocal Leveler ---
+        if (name.containsIgnoreCase("RVox")) {
+            setParam(inst, "Bypass", 0.0f);
+            float compThresh = (directive.targetThresholdDb != 0.0f) ? directive.targetThresholdDb
+                             : (acoustic.rmsDb + (acoustic.crestFactorDb * 0.35f));
+            float normComp = std::clamp((compThresh + 36.0f) / 36.0f, 0.40f, 0.95f);
+            setParam(inst, "Compression", normComp);
+            setParam(inst, "Gate", 0.15f);
+            setParam(inst, "Gain", 0.88f);
+            return;
+        }
+
+        // --- 5. CLA-2A / CLA-3A Opto Compressor ---
+        if (name.containsIgnoreCase("CLA-2A") || name.containsIgnoreCase("CLA-3A")) {
+            setParam(inst, "Bypass", 0.0f);
+            setParam(inst, "Analog", 0.0f);
+            float prVal = std::clamp(0.50f + (acoustic.crestFactorDb * 0.012f), 0.40f, 0.75f);
+            setParam(inst, "Peak Reduction", prVal);
+            setParam(inst, "Gain", 0.52f);
+            return;
+        }
+
+        // --- 6. De-Esser / Sibilance ---
+        if (name.containsIgnoreCase("DeEsser") || name.containsIgnoreCase("Sibilance") || name.containsIgnoreCase("RDeEsser")) {
+            setParam(inst, "Bypass", 0.0f);
+            float targetSibFreq = (directive.deEsserFreqHz > 3000.0f) ? directive.deEsserFreqHz
+                                : (acoustic.sibilanceCentroidHz > 3000.0f ? acoustic.sibilanceCentroidHz : 6800.0f);
+            float normFreq = std::clamp(std::log10(targetSibFreq / 2000.0f) / std::log10(12000.0f / 2000.0f), 0.1f, 0.9f);
+            setParam(inst, "Freq", normFreq);
+            setParam(inst, "Frequency", normFreq);
+            setParam(inst, "Sidechain", 1.0f);
+            setParam(inst, "FilterType", 0.0f);
+            float thresh = std::clamp(0.60f - (acoustic.sibilanceRatio * 0.4f), 0.25f, 0.65f);
+            setParam(inst, "Thresh", thresh);
+            setParam(inst, "Threshold", thresh);
+            return;
+        }
+
+        // --- 7. RBass / Submarine (Sub-Harmonics tuned to Fundamental) ---
+        if (name.containsIgnoreCase("RBass") || name.containsIgnoreCase("Submarine") || name.containsIgnoreCase("MaxxBass")) {
+            setParam(inst, "Bypass", 0.0f);
+            float f0 = (acoustic.fundamentalHz > 30.0f && acoustic.fundamentalHz < 200.0f) ? acoustic.fundamentalHz : 60.0f;
+            float normPitch = std::clamp(std::log10(f0 / 30.0f) / std::log10(200.0f / 30.0f), 0.1f, 0.9f);
+            setParam(inst, "Freq", normPitch);
+            float intensity = (acoustic.subEnergyRatio < 0.10f) ? 0.60f : 0.40f;
+            setParam(inst, "Intensity", intensity);
+            setParam(inst, "Original Bass", 0.50f);
+            return;
+        }
+
+        // --- 8. Magma Lil Tube / Kramer Tape (Harmonic Warming) ---
+        if (name.containsIgnoreCase("Magma") || name.containsIgnoreCase("Kramer Tape") || name.containsIgnoreCase("Saturator")) {
+            setParam(inst, "Bypass", 0.0f);
+            setParam(inst, "Noise", 0.0f);
+            float drive = (acoustic.harmonicRichness < 0.25f) ? 0.48f : 0.25f;
+            setParam(inst, "Drive", drive);
+            setParam(inst, "Record Level", drive);
+            return;
+        }
+
+        // --- 9. Smack Attack (Transient Punch) ---
+        if (name.containsIgnoreCase("Smack Attack") || name.containsIgnoreCase("TransX")) {
+            setParam(inst, "Bypass", 0.0f);
+            float attackBoost = (acoustic.attackSharpness < 0.4f) ? 0.65f : 0.50f;
+            setParam(inst, "Attack", attackBoost);
+            return;
+        }
+
+        // --- 10. SSLComp & API-2500 (Bus VCA Glue) ---
+        if (name.containsIgnoreCase("SSLComp") || name.containsIgnoreCase("SSL G-Master") || name.containsIgnoreCase("API-2500")) {
+            setParam(inst, "Bypass", 0.0f);
+            setParam(inst, "ANLG", 0.0f);
+            setParam(inst, "IN", 1.0f);
+            setParam(inst, "Attack", 0.50f);
+            setParam(inst, "Release", 0.75f);
+            setParam(inst, "Thresh", 0.55f);
+            setParam(inst, "SC Filter", 1.0f);
+            return;
+        }
+    }
+
+    // ==============================================================================
     // Autonomous Calibration: Dials the plugin into an optimal sonic sweet spot
     // ==============================================================================
-    static void dialPluginForInstrument(juce::AudioPluginInstance& inst,
+    static void dialPluginForInstrument(juce::AudioProcessor& inst,
                                         InstrumentType instrument,
                                         BusType busType,
                                         float inputRmsDb = -18.0f) {
+        juce::ignoreUnused(busType, inputRmsDb);
         juce::String name = inst.getName();
 
         // 1. SSL Channel (Console Preamp, Filters, VCA Dynamics & 4-Band Black/Brown EQ)
